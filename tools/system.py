@@ -2,16 +2,14 @@
 
 import platform
 from datetime import datetime
-
 from agent.tools import tool
-
 
 @tool
 def system_info():
     """show system information"""  # First line is the tool's prompt description.
     uname = platform.uname()
     hostname = uname.node
-    os = f"{uname.system} {uname.release} {uname.version} {uname.machine}"
+    os_name = f"{uname.system} {uname.release} {uname.version} {uname.machine}"
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z").strip()
 
     # /proc is Linux-only; report "unavailable" on other systems.
@@ -46,7 +44,7 @@ def system_info():
     return (
         "system information:\n"
         f"hostname: {hostname}\n"
-        f"os: {os}\n"
+        f"os: {os_name}\n"
         f"date: {now}\n"
         f"load: {load}\n"
         f"mem usage: {mem}\n"

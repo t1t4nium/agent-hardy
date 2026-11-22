@@ -1,54 +1,60 @@
-import re
-from . import llm
+"""Agent loop: OpenAI-style tool calling."""
 
+import json
+from . import llm
+from .tools import get_tool_schemas, call_tool
 
 class Agent:
-    """Tool-calling loop: ask the model, run the tool it names, repeat.
-
-    The loop ends when the model answers with "ANSWER:" or when max_steps
-    rounds pass without a final answer (in which case run() returns None).
-    """
-
-    def __init__(self, system_prompt, tools, max_steps=8, reasoning="none", temperature=0.1):
+    def __init__(self, system_prompt, max_steps=8, temperature=0.1, reasoning_effort=None, max_completion_tokens=512, timeout=180):
         self.system_prompt = system_prompt
-        self.tools = tools            # {tool_name: callable}
         self.max_steps = max_steps
-        self.reasoning = reasoning
         self.temperature = temperature
-        self.trace = []               # step-by-step log for debugging
-
-    def _find_tool(self, text):
-        """Return the first registered tool whose name appears in text."""
-        for name in self.tools:
-            if re.search(rf"\b{name}\b", text):
-                return name
-        return None
+        self.reasoning_effort = reasoning_effort
+        self.max_completion_tokens = max_completion_tokens
+        self.timeout = timeout
+        self.trace = []
 
     def run(self, user_prompt):
-        """Run one request end to end and return the model's final answer."""
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        """Run one request end to end and return message and trace as a dict."""
+        messages = [{"role": "system", "content": self.system_prompt}, {"role": "user", "content": user_prompt}]
+        tools = get_tool_schemas()
+        cache = {}
+
         for _ in range(self.max_steps):
-            reply = llm.chat(messages, reasoning=self.reasoning, temperature=self.temperature)
-            self.trace.append(("assistant", reply))
-            messages.append({"role": "assistant", "content": reply})
+            reply = llm.chat(
+                messages,
+                tools=tools,
+                temperature=self.temperature,
+                reasoning_effort=self.reasoning_effort,
+                max_completion_tokens=self.max_completion_tokens,
+                timeout=self.timeout
+            )
+            message = reply["choices"][0]["message"]
+            assistant = {"role": "assistant", "content": message.get("content")}
 
-            # The model signals it is done by prefixing its answer with "ANSWER:".
-            if re.search(r"\bANSWER\s*:", reply):
-                return reply
+            if message.get("tool_calls"):
+                assistant["tool_calls"] = message["tool_calls"]
+            messages.append(assistant)
+            self.trace.append(assistant)
 
-            tool_name = self._find_tool(reply)
-            if tool_name is None:
-                # No tool was named: nudge the model and try again.
-                message = "Name exactly ONE tool from: " + ", ".join(self.tools) + "."
-                self.trace.append(("system", message))
-                messages.append({"role": "user", "content": message})
-                continue
+            tool_calls = message.get("tool_calls") or []
+            if not tool_calls:
+                return {"message": message.get("content") or "", "trace": self.trace}
+            for call in tool_calls:
+                fn = call["function"]
+                raw = fn.get("arguments") or "{}"
+                try:
+                    key = (fn["name"], json.dumps(json.loads(raw), sort_keys=True))
+                except json.JSONDecodeError:
+                    key = (fn["name"], raw)
+                if key not in cache:
+                    cache[key] = call_tool(fn["name"], raw)
+                result = cache[key]
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": result
+                })
+                self.trace.append(("tool", fn["name"], result))
 
-            # Run the tool and feed its output back to the model.
-            result = self.tools[tool_name]()
-            self.trace.append(("tool", f"{tool_name} -> {result}"))
-            messages.append({"role": "user", "content": f"Result of {tool_name}:\n{result}"})
-        return None
+        return {"message": "Step cap reached.", "trace": self.trace}
